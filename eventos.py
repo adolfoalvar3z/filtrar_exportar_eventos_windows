@@ -1,5 +1,11 @@
 import win32evtlog
+import win32con
+import datetime
 from win32com.client import Dispatch
+from colorama import init, Fore, Style
+
+# Inicializamos colorama para los colores en la terminal
+init(autoreset=True)
 
 # Diccionario para interpretar tipos de inicio de sesión
 logon_types = {
@@ -16,86 +22,96 @@ def export_remote_connections():
     server = None  # None para el equipo local
     log_type = 'Security'  # Consultamos el log de seguridad
     
-    # Abrimos el log de eventos de seguridad
     hand = win32evtlog.OpenEventLog(server, log_type)
-    
-    flags = win32evtlog.EVENTLOG_FORWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
-    
-    total_events = win32evtlog.GetNumberOfEventLogRecords(hand)
+    flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
     
     events = []
     
-    while True:
-        records = win32evtlog.ReadEventLog(hand, flags, 0)
-        
-        if not records:
-            break
-        
-        for record in records:
-            # Filtramos eventos relacionados con conexión remota o acceso SMB (ID 4624, 4776)
-            if record.EventID in [4624, 4776]:
-                event_time = record.TimeGenerated.Format()
-                user_name = None
-                domain_name = None
-                source_ip = None
-                logon_type = None
-                logon_success = "Correcta"
-                
-                # Extraemos detalles del evento
-                for i, string in enumerate(record.StringInserts):
-                    if "Account Name" in string:
-                        user_name = string.split(":")[-1].strip()
-                    elif "Account Domain" in string:
-                        domain_name = string.split(":")[-1].strip()
-                    elif "Source Network Address" in string:
-                        source_ip = string.split(":")[-1].strip()
-                    elif "Logon Type" in string:
-                        logon_type_code = int(record.StringInserts[8])
-                        if logon_type_code in logon_types:
-                            logon_type = logon_types[logon_type_code]
-                        else:
-                            continue  # Saltamos este evento si el tipo de inicio de sesión no está en logon_types
-                
-                # Detectar si fue un inicio exitoso o no (ID 4624 suele ser exitoso, 4776 depende de otros factores)
-                if record.EventID == 4776 and "FAILURE" in record.StringInserts[0]:
-                    logon_success = "Fallida"
-                
-                # Solo añadimos el evento si el tipo de inicio de sesión está en logon_types
-                if logon_type:
-                    events.append({
+    try:
+        while True:
+            records = win32evtlog.ReadEventLog(hand, flags, 0)
+            if not records:
+                break
+            
+            for record in records:
+                if record.EventID in [4624, 4776]:  # Eventos de inicio de sesión remoto y SMB
+                    event_data = {
                         "Event ID": record.EventID,
-                        "Time Generated": event_time,
-                        "User Name": user_name,
-                        "Domain": domain_name,
-                        "Source IP": source_ip,
-                        "Logon Type": logon_type,
-                        "Logon Success": logon_success
-                    })
+                        "Time Generated": record.TimeGenerated.Format(),
+                        "User Name": "",
+                        "Domain": "",
+                        "Source IP": "",
+                        "Workstation Name": "",
+                        "Logon Type": "",
+                        "Logon Success": "Correcta"
+                    }
+                    
+                    for data in record.StringInserts:
+                        if "Account Name:" in data:
+                            event_data["User Name"] = data.split(":")[-1].strip()
+                        elif "Account Domain:" in data:
+                            event_data["Domain"] = data.split(":")[-1].strip()
+                        elif "Source Network Address:" in data:
+                            event_data["Source IP"] = data.split(":")[-1].strip()
+                        elif "Workstation Name:" in data:
+                            event_data["Workstation Name"] = data.split(":")[-1].strip()
+                        elif "Logon Type:" in data:
+                            logon_type_code = int(data.split(":")[-1].strip())
+                            event_data["Logon Type"] = logon_types.get(logon_type_code, f"Desconocido ({logon_type_code})")
+                    
+                    if record.EventID == 4776 and "Failure" in record.StringInserts[0]:
+                        event_data["Logon Success"] = "Fallida"
+                    
+                    events.append(event_data)
     
-    win32evtlog.CloseEventLog(hand)
+    finally:
+        win32evtlog.CloseEventLog(hand)
+    
     return events
 
 # Guardamos los eventos en un archivo y los mostramos por pantalla
 events = export_remote_connections()
 
+# Separar los eventos de conexiones remotas y SMB del resto
+events_remote_smb = [e for e in events if e["Logon Type"] in ["Red (Conexión SMB u otra red)", "Inicio remoto (RDP)"]]
+events_other = [e for e in events if e not in events_remote_smb]
+
+# Mostrar solo las conexiones remotas y SMB en pantalla con colores distintos
+for event in events_remote_smb:
+    color = Fore.GREEN if event["Logon Type"] == "Inicio remoto (RDP)" else Fore.YELLOW
+    formatted_event = (
+        f"{color}Fecha: {event['Time Generated']}\n"
+        f"Usuario: {event['User Name']}\n"
+        f"Dominio: {event['Domain']}\n"
+        f"IP de origen: {event['Source IP']}\n"
+        f"Nombre de estación de trabajo: {event['Workstation Name']}\n"
+        f"Tipo de conexión: {event['Logon Type']}\n"
+        f"Resultado de la conexión: {event['Logon Success']}\n"
+        f"ID del evento: {event['Event ID']} (Tipo de conexión: {event['Logon Type']})
+"
+        f"----------------------------------------"
+    )
+    print(formatted_event)  # Mostrar por pantalla
+
 # Formateo de los eventos para la exportación
 formatted_events = []
-for event in events:
+for event in events_remote_smb + events_other:
     formatted_event = (
         f"Fecha: {event['Time Generated']}\n"
         f"Usuario: {event['User Name']}\n"
         f"Dominio: {event['Domain']}\n"
         f"IP de origen: {event['Source IP']}\n"
+        f"Nombre de estación de trabajo: {event['Workstation Name']}\n"
         f"Tipo de conexión: {event['Logon Type']}\n"
         f"Resultado de la conexión: {event['Logon Success']}\n"
-        f"ID del evento: {event['Event ID']}\n"
+        f"ID del evento: {event['Event ID']} (Tipo de conexión: {event['Logon Type']})
+"
         "----------------------------------------"
     )
     formatted_events.append(formatted_event)
-    print(formatted_event)  # Mostrar por pantalla
 
 # Guardar los eventos en un archivo de texto
-with open("logs_de_conexiones.txt", "w") as f:
+with open("remote_connections_log.txt", "w", encoding="utf-8") as f:
     f.write("\n\n".join(formatted_events))
 
-print("\nEventos exportados a 'logs_de_conexiones.txt'")
+print(f"\nSe encontraron {len(events)} eventos. Exportados a 'remote_connections_log.txt'")
