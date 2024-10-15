@@ -6,3 +6,4 @@ pip install -r requerimientos.txt
 cls
 @echo on
 py eventos.py
+pause
